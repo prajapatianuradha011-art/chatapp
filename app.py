@@ -121,7 +121,7 @@ def handle_message(data):
     }, broadcast=True)
 
 if __name__ == '__main__':
-    socketio.run(app, debug=True, use_reloader=False, port=5000)
+    socketio.run(app, debug=True, port=5001)
 
 send({
     "username": session.get('user'),
