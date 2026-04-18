@@ -1,150 +1,233 @@
 import eventlet
 eventlet.monkey_patch()
 
+import os
 from flask import Flask, render_template, request, redirect, session
-from flask_socketio import SocketIO, send, emit
+from flask_socketio import SocketIO, emit
 import sqlite3
+import hashlib
 
 app = Flask(__name__)
-app.secret_key = "secret123"
-socketio = SocketIO(app, cors_allowed_origins="*", async_mode='eventlet')
+app.secret_key = os.environ.get("SECRET_KEY", "change-me-in-production")
 
-# 🔹 Create DB
-def init_db():
+# ✅ CRITICAL FIX: Use correct SocketIO config for Render
+socketio = SocketIO(
+    app,
+    cors_allowed_origins="*",
+    async_mode='eventlet',
+    logger=True,
+    engineio_logger=True,
+    ping_timeout=60,
+    ping_interval=25
+)
+
+
+# ── Helpers ───────────────────────────────────────────────────────────────────
+
+def hash_password(password: str) -> str:
+    return hashlib.sha256(password.encode()).hexdigest()
+
+
+def get_db():
     conn = sqlite3.connect("index.db")
-    c = conn.cursor()
+    conn.row_factory = sqlite3.Row
+    return conn
 
+
+# ── Init DB ───────────────────────────────────────────────────────────────────
+
+def init_db():
+    conn = get_db()
+    c = conn.cursor()
     c.execute("""
     CREATE TABLE IF NOT EXISTS users (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        username TEXT UNIQUE,
-        password TEXT
+        id       INTEGER PRIMARY KEY AUTOINCREMENT,
+        username TEXT UNIQUE NOT NULL,
+        password TEXT NOT NULL
     )
     """)
-
     c.execute("""
     CREATE TABLE IF NOT EXISTS messages (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        username TEXT,
-        msg TEXT
+        id       INTEGER PRIMARY KEY AUTOINCREMENT,
+        username TEXT NOT NULL,
+        msg      TEXT NOT NULL
     )
     """)
-
     conn.commit()
     conn.close()
 
 init_db()
 
 
-# 🟢 SIGNUP
+# ── Auth routes ───────────────────────────────────────────────────────────────
+
 @app.route('/signup', methods=['GET', 'POST'])
 def signup():
     if request.method == 'POST':
         username = request.form['username'].strip().lower()
-        password = request.form['password']
-
-        conn = sqlite3.connect("index.db")
-        c = conn.cursor()
-
+        password = hash_password(request.form['password'])
         try:
-            c.execute("INSERT INTO users (username, password) VALUES (?, ?)", (username, password))
+            conn = get_db()
+            conn.execute(
+                "INSERT INTO users (username, password) VALUES (?, ?)",
+                (username, password)
+            )
             conn.commit()
-        except:
-            conn.close()
+        except sqlite3.IntegrityError:
             return render_template('signup.html', error="Username already exists ❌")
-
-        conn.close()
+        finally:
+            conn.close()
         return redirect('/login')
-
     return render_template('signup.html')
 
 
-# 🟢 LOGIN
 @app.route('/login', methods=['GET', 'POST'])
 def login():
     if request.method == 'POST':
         username = request.form['username'].strip().lower()
-        password = request.form['password']
-
-        conn = sqlite3.connect("index.db")
-        c = conn.cursor()
-
-        c.execute("SELECT * FROM users WHERE username=? AND password=?", (username, password))
-        user = c.fetchone()
-
+        password = hash_password(request.form['password'])
+        conn = get_db()
+        user = conn.execute(
+            "SELECT * FROM users WHERE username=? AND password=?",
+            (username, password)
+        ).fetchone()
         conn.close()
-
         if user:
             session['user'] = username
             return redirect('/')
-        else:
-            return render_template('login.html', error="Invalid login ❌")
-
+        return render_template('login.html', error="Invalid credentials ❌")
     return render_template('login.html')
 
 
-# 🟢 LOGOUT
 @app.route('/logout')
 def logout():
     session.pop('user', None)
     return redirect('/login')
 
 
-# 🟢 HOME
 @app.route('/')
 def home():
     if 'user' not in session:
         return redirect('/login')
-
     return render_template('index.html', username=session['user'])
 
 
-# 🟢 SEND MESSAGE
-@socketio.on('message')
-def handle_message(data):
+# ── Socket events ─────────────────────────────────────────────────────────────
+
+# ✅ Store username by socket ID (fixes unreliable session in SocketIO)
+connected_users = {}
+
+
+@socketio.on('connect')
+def on_connect():
     username = session.get('user')
-    msg = data['msg']
+    if not username:
+        return False  # reject unauthenticated
 
-    conn = sqlite3.connect("index.db")
-    c = conn.cursor()
+    connected_users[request.sid] = username
+    print(f"✅ {username} connected | sid: {request.sid}")
 
-    c.execute("INSERT INTO messages (username, msg) VALUES (?, ?)", (username, msg))
-    conn.commit()
-
-    msg_id = c.lastrowid
+    # Send full message history to this client only
+    conn = get_db()
+    rows = conn.execute(
+        "SELECT id, username, msg FROM messages ORDER BY id ASC"
+    ).fetchall()
     conn.close()
 
-# 🟢 EDIT MESSAGE
+    history = [{"id": r["id"], "username": r["username"], "msg": r["msg"]} for r in rows]
+    emit('history', history)
+
+    # Notify all users someone joined
+    emit('user_joined', {'username': username}, broadcast=True)
+
+
+@socketio.on('disconnect')
+def on_disconnect():
+    username = connected_users.pop(request.sid, 'Unknown')
+    print(f"❌ {username} disconnected")
+    emit('user_left', {'username': username}, broadcast=True)
+
+
+@socketio.on('message')
+def handle_message(data):
+    # ✅ Use socket-id dict instead of session for reliability
+    username = connected_users.get(request.sid) or session.get('user')
+    if not username:
+        return
+
+    msg = data.get('msg', '').strip()
+    if not msg:
+        return
+
+    conn = get_db()
+    cursor = conn.execute(
+        "INSERT INTO messages (username, msg) VALUES (?, ?)", (username, msg)
+    )
+    conn.commit()
+    msg_id = cursor.lastrowid
+    conn.close()
+
+    print(f"📨 Message from {username}: {msg}")
+
+    # ✅ Broadcast to ALL connected clients
+    emit('new_message', {
+        'id': msg_id,
+        'username': username,
+        'msg': msg
+    }, broadcast=True)
+
+
 @socketio.on('edit_message')
 def edit_message(data):
-    msg_id = data['id']
-    new_msg = data['msg']
+    username = connected_users.get(request.sid) or session.get('user')
+    if not username:
+        return
 
-    conn = sqlite3.connect("index.db")
-    c = conn.cursor()
+    msg_id  = data.get('id')
+    new_msg = data.get('msg', '').strip()
+    if not msg_id or not new_msg:
+        return
 
-    c.execute("UPDATE messages SET msg=? WHERE id=?", (new_msg, msg_id))
+    conn = get_db()
+    row = conn.execute("SELECT username FROM messages WHERE id=?", (msg_id,)).fetchone()
+    if not row or row['username'] != username:
+        conn.close()
+        emit('error', {'msg': 'Not authorised to edit this message.'})
+        return
+
+    conn.execute("UPDATE messages SET msg=? WHERE id=?", (new_msg, msg_id))
     conn.commit()
     conn.close()
 
     emit('message_edited', {'id': msg_id, 'msg': new_msg}, broadcast=True)
 
 
-# 🟢 DELETE MESSAGE
 @socketio.on('delete_message')
 def delete_message(data):
-    msg_id = data['id']
+    username = connected_users.get(request.sid) or session.get('user')
+    if not username:
+        return
 
-    conn = sqlite3.connect("index.db")
-    c = conn.cursor()
+    msg_id = data.get('id')
+    if not msg_id:
+        return
 
-    c.execute("DELETE FROM messages WHERE id=?", (msg_id,))
+    conn = get_db()
+    row = conn.execute("SELECT username FROM messages WHERE id=?", (msg_id,)).fetchone()
+    if not row or row['username'] != username:
+        conn.close()
+        emit('error', {'msg': 'Not authorised to delete this message.'})
+        return
+
+    conn.execute("DELETE FROM messages WHERE id=?", (msg_id,))
     conn.commit()
     conn.close()
 
     emit('message_deleted', {'id': msg_id}, broadcast=True)
 
 
-# 🟢 RUN
+# ── Entry point ───────────────────────────────────────────────────────────────
+
 if __name__ == '__main__':
-    socketio.run(app)
+    port = int(os.environ.get("PORT", 5000))
+    socketio.run(app, host='0.0.0.0', port=port)
