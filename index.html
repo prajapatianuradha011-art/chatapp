@@ -2,244 +2,188 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <title>WhatsApp Chat</title>
-    <link rel="stylesheet" href="style.css">
-    <script src="https://cdn.socket.io/4.7.2/socket.io.min.js"></script>
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <link rel="stylesheet" href="app.py">
-    <link rel="stylesheet" href="style.css">
+    <title>Chat App</title>
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body { font-family: Arial, sans-serif; background: #f0f2f5; height: 100vh; display: flex; flex-direction: column; }
+        #header { background: #075e54; color: white; padding: 15px 20px; display: flex; justify-content: space-between; align-items: center; }
+        #header h2 { font-size: 18px; }
+        #header a { color: #ccc; text-decoration: none; font-size: 14px; }
+        #status { font-size: 12px; color: #aed6f1; }
+        #messages { flex: 1; overflow-y: auto; padding: 15px; display: flex; flex-direction: column; gap: 8px; }
+        .msg-bubble { max-width: 70%; padding: 10px 14px; border-radius: 12px; font-size: 14px; line-height: 1.4; position: relative; }
+        .msg-bubble.mine { background: #dcf8c6; align-self: flex-end; border-bottom-right-radius: 2px; }
+        .msg-bubble.theirs { background: white; align-self: flex-start; border-bottom-left-radius: 2px; box-shadow: 0 1px 2px rgba(0,0,0,0.1); }
+        .msg-bubble .sender { font-weight: bold; font-size: 12px; color: #075e54; margin-bottom: 3px; }
+        .msg-bubble .text { word-break: break-word; }
+        .msg-bubble .actions { font-size: 11px; color: #999; margin-top: 5px; display: none; gap: 8px; }
+        .msg-bubble:hover .actions { display: flex; }
+        .actions span { cursor: pointer; color: #075e54; }
+        .actions span:hover { text-decoration: underline; }
+        #input-area { background: white; padding: 12px 15px; display: flex; gap: 10px; border-top: 1px solid #ddd; }
+        #msg-input { flex: 1; padding: 10px 14px; border: 1px solid #ddd; border-radius: 25px; outline: none; font-size: 14px; }
+        #send-btn { background: #075e54; color: white; border: none; padding: 10px 20px; border-radius: 25px; cursor: pointer; font-size: 14px; }
+        #send-btn:hover { background: #128c7e; }
+        .system-msg { text-align: center; font-size: 12px; color: #999; padding: 4px; }
+    </style>
 </head>
 <body>
 
-<a href="/logout" class="logout-btn">
-    🔓 Logout
-</a>
-
-<div class="chat-container">
-    <div id="users-box">
-        <h4>🟢 Online Users</h4>
-        <ul id="users"></ul>
+<div id="header">
+    <div>
+        <h2>💬 Chat App</h2>
+        <span id="status">Connecting...</span>
     </div>
-
-    <!-- Header -->  
-    <div class="header">
-        <h3>💬 My chatting website</h3>
-        <input id="username" placeholder="Your name" />
-    </div>
-
-    <!-- Chat Area -->
-    <div id="chat-box">
-        <ul id="messages"></ul>
-        <div id="typing-status"></div>
-    </div>
-
-    <!-- Input Area -->
-    <div class="input-area">
-        <input id="message" placeholder="Type a message..." />
-        <button onclick="sendMessage()">➤</button>
-        <button onclick="toggleEmoji()">😊</button>
-        <button onclick="startRecording()">🎤</button>
-        <div id="emoji-box" style="display:none;"></div>
-    </div>
+    <a href="/logout">Logout</a>
 </div>
 
+<div id="messages"></div>
+
+<div id="input-area">
+    <input type="text" id="msg-input" placeholder="Type a message..." autocomplete="off" />
+    <button id="send-btn">Send</button>
+</div>
+
+<!-- ✅ MUST use same version as server's flask-socketio -->
+<script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>
+
 <script>
-    const socket = io();
-    let myName = '';
-    let typingTimeout;
-    let mediaRecorder;
-    let audioChunks = [];
+    const currentUser = "{{ username }}";
+    const messagesDiv = document.getElementById('messages');
+    const msgInput = document.getElementById('msg-input');
+    const statusEl = document.getElementById('status');
 
-    // Consolidated message handler
-    socket.on('message', function(data) {
-        const item = document.createElement('li');
-        myName = document.getElementById('username').value || '{{ username }}';
-
-        if (data.username === myName) {
-            item.className = 'my-message';
-
-            item.id = data.id;       // ✅ ADD THIS LINE HERE
-
-            item.innerHTML = `
-
-                <span>${data.msg}</span><br>
-                <small>${data.username}</small>
-                <div class="ticks" id="tick-${data.id}">✔</div>
-            `;
-        } else {
-            item.className = 'other-message';
-            item.innerHTML = `
-                <span>${data.msg}</span><br>
-                <small>${data.username}</small>
-            `;
-            socket.emit('seen', {id: data.id});
-        }
-
-        document.getElementById('messages').appendChild(item);
-        document.getElementById('chat-box').scrollTop = document.getElementById('chat-box').scrollHeight;
-        
-
-        item.innerHTML = `
-    <span class="msg-text">${data.msg}</span>
-
-    ${data.username === myName ? `
-        <div class="actions">
-            <button onclick="editMsg('${data.id}')">✏️</button>
-            <button onclick="deleteMsg('${data.id}')">🗑</button>
-        </div>
-    ` : ""}
-
-    <div class="msg-info">
-        <small>${data.time || ""}</small>
-    </div>
-`;
+    // ✅ Connect to SocketIO
+    const socket = io({
+        transports: ['websocket', 'polling'],  // try websocket first, fallback to polling
+        reconnectionAttempts: 5,
+        reconnectionDelay: 1000
     });
 
-    // Tick updates
-    socket.on('delivered', function(data) {
-        const tick = document.getElementById('tick-' + data.id);
-        if (tick) tick.innerHTML = '✔✔';
+    // ── Connection status ──────────────────────────────────────────────────────
+
+    socket.on('connect', () => {
+        statusEl.textContent = '🟢 Connected';
+        console.log('Connected:', socket.id);
     });
 
-    socket.on('seen', function(data) {
-        const tick = document.getElementById('tick-' + data.id);
-        if (tick) {
-            tick.innerHTML = '✔✔';
-            tick.style.color = '#4fc3f7';
-        }
+    socket.on('disconnect', () => {
+        statusEl.textContent = '🔴 Disconnected';
     });
 
-    // Typing indicator
-    socket.on('typing', function(data) {
-        if (data.username !== myName) {
-            document.getElementById('typing-status').innerText = data.username + ' is typing...';
-        }
+    socket.on('connect_error', (err) => {
+        statusEl.textContent = '⚠️ Connection error';
+        console.error('Connection error:', err);
     });
 
-    // User list
-    socket.on('user_list', function(users) {
-        const list = document.getElementById('users');
-        list.innerHTML = '';
-        users.forEach(user => {
-            const li = document.createElement('li');
-            li.innerText = '🟢 ' + user;
-            list.appendChild(li);
-        });
+    // ── Load history ───────────────────────────────────────────────────────────
+
+    socket.on('history', (messages) => {
+        messagesDiv.innerHTML = '';
+        messages.forEach(m => addMessage(m.id, m.username, m.msg));
+        scrollToBottom();
     });
 
-    // Send message
+    // ── Receive new message ────────────────────────────────────────────────────
+
+    socket.on('new_message', (data) => {
+        addMessage(data.id, data.username, data.msg);
+        scrollToBottom();
+    });
+
+    // ── Edit/Delete events ─────────────────────────────────────────────────────
+
+    socket.on('message_edited', (data) => {
+        const el = document.querySelector(`[data-id="${data.id}"] .text`);
+        if (el) el.textContent = data.msg;
+    });
+
+    socket.on('message_deleted', (data) => {
+        const el = document.querySelector(`[data-id="${data.id}"]`);
+        if (el) el.remove();
+    });
+
+    // ── User join/leave ────────────────────────────────────────────────────────
+
+    socket.on('user_joined', (data) => {
+        addSystemMsg(`${data.username} joined the chat`);
+    });
+
+    socket.on('user_left', (data) => {
+        addSystemMsg(`${data.username} left the chat`);
+    });
+
+    // ── Send message ───────────────────────────────────────────────────────────
+
     function sendMessage() {
-        const msg = document.getElementById('message').value.trim();
-        const username = document.getElementById('username').value || '{{ username }}';
-        if (!msg || !username) return;
-
-        socket.emit('message', {msg: msg});
-        document.getElementById('message').value = '';
+        const msg = msgInput.value.trim();
+        if (!msg) return;
+        socket.emit('message', { msg });
+        msgInput.value = '';
     }
 
-    // Enter key send
-    document.getElementById('message').addEventListener('keydown', function(e) {
-        if (e.key === 'Enter' && !e.shiftKey) {
-            e.preventDefault();
-            sendMessage();
-        }
+    document.getElementById('send-btn').addEventListener('click', sendMessage);
+
+    msgInput.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') sendMessage();
     });
 
-    // Typing events
-    document.getElementById('message').addEventListener('input', function() {
-        const username = document.getElementById('username').value || '{{ username }}';
-        socket.emit('typing', {username: username});
-        clearTimeout(typingTimeout);
-        typingTimeout = setTimeout(() => {
-            document.getElementById('typing-status').innerText = '';
-        }, 2000);
-    });
+    // ── Helpers ────────────────────────────────────────────────────────────────
 
-    // Join room
-    document.getElementById('username').addEventListener('change', function() {
-        const username = this.value.trim();
-        if (username) socket.emit('join', {username: username});
-    });
+    function addMessage(id, username, msg) {
+        const isMine = username === currentUser;
+        const bubble = document.createElement('div');
+        bubble.className = `msg-bubble ${isMine ? 'mine' : 'theirs'}`;
+        bubble.dataset.id = id;
 
-    // Emoji picker
-    const emojis = ['😀','😄','😁','😅','😆','😂','🤣','😙','😚','😘','🥰','😍','😭','🥳','🤩',
-                    '😊','☺️','😝','😜','🤭','😤','😡','🤬','💘','💝','💖','💞','❤️‍🩹','💗'];
-    function toggleEmoji() {
-        const box = document.getElementById('emoji-box');
-        box.style.display = box.style.display === 'none' ? 'block' : 'none';
-        if (box.style.display === 'block') {
-            box.innerHTML = '';
-            emojis.forEach(e => {
-                const span = document.createElement('span');
-                span.innerText = e;
-                span.style.cssText = 'font-size:20px;margin:5px;cursor:pointer';
-                span.onclick = () => document.getElementById('message').value += e;
-                box.appendChild(span);
-            });
+        bubble.innerHTML = `
+            ${!isMine ? `<div class="sender">${escapeHtml(username)}</div>` : ''}
+            <div class="text">${escapeHtml(msg)}</div>
+            ${isMine ? `
+            <div class="actions">
+                <span onclick="editMsg(${id}, this)">✏️ Edit</span>
+                <span onclick="deleteMsg(${id})">🗑️ Delete</span>
+            </div>` : ''}
+        `;
+        messagesDiv.appendChild(bubble);
+    }
+
+    function addSystemMsg(text) {
+        const div = document.createElement('div');
+        div.className = 'system-msg';
+        div.textContent = text;
+        messagesDiv.appendChild(div);
+        scrollToBottom();
+    }
+
+    function editMsg(id, el) {
+        const bubble = el.closest('.msg-bubble');
+        const textEl = bubble.querySelector('.text');
+        const newMsg = prompt('Edit message:', textEl.textContent);
+        if (newMsg && newMsg.trim()) {
+            socket.emit('edit_message', { id, msg: newMsg.trim() });
         }
     }
 
-    // Voice recording
-    async function startRecording() {
-        try {
-            const stream = await navigator.mediaDevices.getUserMedia({audio: true});
-            mediaRecorder = new MediaRecorder(stream);
-            audioChunks = [];
-
-            mediaRecorder.ondataavailable = e => audioChunks.push(e.data);
-            mediaRecorder.onstop = () => {
-                const audioBlob = new Blob(audioChunks);
-                const audioURL = URL.createObjectURL(audioBlob);
-                socket.emit('message', {
-                    msg: `<audio controls src="${audioURL}"></audio>`
-                });
-                stream.getTracks().forEach(track => track.stop());
-            };
-            mediaRecorder.start();
-            setTimeout(() => mediaRecorder.stop(), 3000);
-        } catch (err) {
-            console.error('Recording failed:', err);
+    function deleteMsg(id) {
+        if (confirm('Delete this message?')) {
+            socket.emit('delete_message', { id });
         }
-    };
-
-
-// EDIT
-function editMsg(id){
-    let newMsg = prompt("Edit your message:");
-    if(newMsg){
-        socket.emit('edit_message', {
-            id: id,
-            msg: newMsg
-        });
     }
-}
 
-// DELETE
-function deleteMsg(id){
-    if(confirm("Delete this message?")){
-        socket.emit('delete_message', {id: id});
-        
+    function scrollToBottom() {
+        messagesDiv.scrollTop = messagesDiv.scrollHeight;
     }
-}
 
-// update edited message
-socket.on('message_edited', function(data){
-    let msg = document.querySelector(`#${data.id} .msg-text`);
-    if(msg){
-        msg.innerText = data.msg;
+    function escapeHtml(text) {
+        return text
+            .replace(/&/g, "&amp;")
+            .replace(/</g, "&lt;")
+            .replace(/>/g, "&gt;")
+            .replace(/"/g, "&quot;");
     }
-});
-
-// remove deleted message
-socket.on('message_deleted', function(data){
-    let item = document.getElementById(data.id);
-    if(item){
-        item.remove();
-    }
-});
-
 </script>
 
 </body>
 </html>
-
