@@ -1,0 +1,6 @@
+Flask
+Flask-Socketio
+eventlet
+gunicorn==21.0.0
+setuptools>=65.0.0
+psycopg2-binary
