@@ -1,12 +1,10 @@
 import eventlet
 eventlet.monkey_patch()
+from flask import Flask
 
-import os
 from flask import Flask, render_template, request, redirect, session
-from flask_socketio import SocketIO, emit
+from flask_socketio import SocketIO, send, emit
 import sqlite3
-import hashlib
-
 app = Flask(__name__)
 app.secret_key = os.environ.get("SECRET_KEY", "change-me-in-production")
 
